@@ -74,8 +74,8 @@ jobs:
         run: |
           OS_NAME=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
           echo "os_name=${OS_NAME}" >> $GITHUB_OUTPUT
-          # Pick the rocksdb-static variant (plain vs jemalloc) for this A/B leg.
-          # runner.os casing (Linux) matches the published asset names.
+          # Pick the rocksdb-static artifact for the matrix variant (a -jemalloc
+          # suffix). runner.os casing (Linux) matches the published asset names.
           SUFFIX=""
           if [ "${{ matrix.variant }}" = "jemalloc" ]; then SUFFIX="-jemalloc"; fi
           echo "art_name=rocksdb-static-${{ env.ROCKSDB_VERSION }}${SUFFIX}-${{ runner.os }}-${{ matrix.arch }}.tar.gz" >> $GITHUB_OUTPUT
