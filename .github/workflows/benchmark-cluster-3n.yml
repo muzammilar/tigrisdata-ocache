@@ -16,6 +16,12 @@ on:
       - "LICENSE"
       - ".gitignore"
 
+# Cancel superseded runs of the same PR (a new push replaces the old run); never
+# cancel a run on main, so every merged commit completes its checks.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   GO_VERSION: "1.24.2"
   ROCKSDB_VERSION: "10.4.2"
@@ -25,18 +31,18 @@ env:
 jobs:
   benchmark-cluster-3n:
     strategy:
-      # Run both allocator variants so their throughput/latency can be compared
-      # (A/B for issue #176); don't cancel one variant if the other fails.
+      # jemalloc only: the plain/jemalloc A/B (issue #176) is concluded, and one
+      # leg halves the benchmark load every push places on the runner pool.
       fail-fast: false
       matrix:
         include:
           - os: namespace-profile-ubuntu-2404-medium
             arch: x86_64
-            variant: plain
-          - os: namespace-profile-ubuntu-2404-medium
-            arch: x86_64
             variant: jemalloc
     runs-on: ${{ matrix.os }}
+    # A hung step must not hold a runner for GitHub's 6-hour default; a normal
+    # run takes 4-12 min.
+    timeout-minutes: 30
 
     permissions:
       actions: write
