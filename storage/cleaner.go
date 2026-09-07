@@ -4,6 +4,7 @@
 package storage
 
 import (
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,6 +84,10 @@ type Cleaner struct {
 
 	// lastSizeRecalc is owned by cleanupLoop and initialized when that loop starts.
 	lastSizeRecalc time.Time
+	// lastOrphanSweep is when the orphan raw-file sweep last ran; zero until the
+	// startup reconcile runs it. Owned by the reconcile caller (Start, then the
+	// cleanup loop), like lastSizeRecalc.
+	lastOrphanSweep time.Time
 
 	// stats
 	totalSize   atomic.Int64
@@ -547,6 +552,19 @@ func (c *Cleaner) reconcileFromMetadata() {
 		batch.Clear()
 	}
 
+	// When the orphan sweep is due (startup, then every orphanSweepInterval),
+	// this scan also collects the base name of every raw file a metadata row
+	// on the snapshot points at (live or expired-but-unswept: either way the
+	// row still owns the file), with its payload bytes. The sweep deletes
+	// nothing in this set and stats nothing in it either. Base names, not
+	// paths, so a data directory that has been moved still matches. Roughly
+	// 44 bytes per raw-file row, held only for this pass.
+	sweepDue := c.lastOrphanSweep.IsZero() || time.Since(c.lastOrphanSweep) >= orphanSweepInterval
+	var referencedRaw map[string]int64
+	if sweepDue {
+		referencedRaw = make(map[string]int64)
+	}
+
 	for it.SeekToFirst(); it.Valid(); it.Next() {
 		// Check if we're shutting down
 		select {
@@ -570,8 +588,11 @@ func (c *Cleaner) reconcileFromMetadata() {
 		// it directly off the wire rather than fully decoding each message —
 		// that skips a Data-payload copy per inline row (up to the 64 KiB inline
 		// threshold) on both the startup scan and the hourly reconciliation.
-		if length, ok := valueMessageValueLength(it.Value().Data()); ok {
+		if length, rawPath, ok := valueMessageSizeAndRawPath(it.Value().Data()); ok {
 			totalSize += length
+			if sweepDue && rawPath != "" {
+				referencedRaw[filepath.Base(rawPath)] = length
+			}
 		}
 
 		if backfill && !backrefBroken {
@@ -639,6 +660,14 @@ func (c *Cleaner) reconcileFromMetadata() {
 		event = event.Int("backfilled", backfilled).Str("policy", c.storage.evictionPolicy)
 	}
 	event.Msg("cleaner: reconciled total storage size from metadata")
+
+	// Only after a complete scan: a truncated one returned above, and sweeping
+	// against a partial reference set would delete live files.
+	// The clock advances only on a completed sweep, so one that could not read
+	// the directory is retried by the next reconcile instead of in a day.
+	if sweepDue && c.sweepOrphanRawFiles(referencedRaw, start) {
+		c.lastOrphanSweep = time.Now()
+	}
 }
 
 // advanceBackrefTo advances the sorted back-reference iterator to userKey and
