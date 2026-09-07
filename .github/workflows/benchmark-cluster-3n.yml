@@ -16,11 +16,11 @@ on:
       - "LICENSE"
       - ".gitignore"
 
-# Cancel superseded runs of the same PR (a new push replaces the old run); never
-# cancel a run on main, so every merged commit completes its checks.
+# Non-PR runs get a run-unique group: a shared non-cancelling group keeps at most
+# one pending run, silently dropping the middle of three rapid pushes to main.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 env:
   GO_VERSION: "1.24.2"
@@ -212,8 +212,8 @@ jobs:
 
       - name: Start RSS sampler
         run: |
-          # Record aggregate node RSS across all benchmarks so plain vs jemalloc
-          # allocator footprint can be compared (issue #176).
+          # Record aggregate node RSS across all benchmarks to track the jemalloc
+          # build's memory footprint over time (issue #176).
           nohup bash scripts/rss-sample.sh rss-samples.csv 1 \
             "$(cat node1.pid)" "$(cat node2.pid)" "$(cat node3.pid)" >/dev/null 2>&1 &
           echo "RSS_SAMPLER_PID=$!" >> $GITHUB_ENV

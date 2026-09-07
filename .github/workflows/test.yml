@@ -17,11 +17,12 @@ on:
       - ".gitignore"
   workflow_call:
 
-# Cancel superseded runs of the same PR (a new push replaces the old run); never
-# cancel a run on main, so every merged commit completes its checks.
+# Non-PR runs get a run-unique group: a shared non-cancelling group keeps at most
+# one pending run, silently dropping the middle of three rapid pushes (on main,
+# or a release invocation of this reusable workflow).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 env:
   GO_VERSION: "1.24.2"
