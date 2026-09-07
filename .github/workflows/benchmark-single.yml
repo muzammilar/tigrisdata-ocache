@@ -16,6 +16,12 @@ on:
       - "LICENSE"
       - ".gitignore"
 
+# Non-PR runs get a run-unique group: a shared non-cancelling group keeps at most
+# one pending run, silently dropping the middle of three rapid pushes to main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 env:
   GO_VERSION: "1.24.2"
   ROCKSDB_VERSION: "10.4.2"
@@ -25,18 +31,18 @@ env:
 jobs:
   benchmark-single:
     strategy:
-      # Run both allocator variants so their throughput/latency can be compared
-      # (A/B for issue #176); don't cancel one variant if the other fails.
+      # jemalloc only: the plain/jemalloc A/B (issue #176) is concluded, and one
+      # leg halves the benchmark load every push places on the runner pool.
       fail-fast: false
       matrix:
         include:
           - os: namespace-profile-ubuntu-2404-medium
             arch: x86_64
-            variant: plain
-          - os: namespace-profile-ubuntu-2404-medium
-            arch: x86_64
             variant: jemalloc
     runs-on: ${{ matrix.os }}
+    # A hung step must not hold a runner for GitHub's 6-hour default; a normal
+    # run takes 4-10 min.
+    timeout-minutes: 30
 
     permissions:
       actions: write
@@ -68,8 +74,8 @@ jobs:
         run: |
           OS_NAME=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
           echo "os_name=${OS_NAME}" >> $GITHUB_OUTPUT
-          # Pick the rocksdb-static variant (plain vs jemalloc) for this A/B leg.
-          # runner.os casing (Linux) matches the published asset names.
+          # Pick the rocksdb-static artifact for the matrix variant (a -jemalloc
+          # suffix). runner.os casing (Linux) matches the published asset names.
           SUFFIX=""
           if [ "${{ matrix.variant }}" = "jemalloc" ]; then SUFFIX="-jemalloc"; fi
           echo "art_name=rocksdb-static-${{ env.ROCKSDB_VERSION }}${SUFFIX}-${{ runner.os }}-${{ matrix.arch }}.tar.gz" >> $GITHUB_OUTPUT
@@ -134,7 +140,7 @@ jobs:
       - name: Start RSS sampler
         run: |
           # Record the server's RSS (VmRSS/RssAnon/VmData) across all benchmarks
-          # so plain vs jemalloc allocator footprint can be compared (issue #176).
+          # to track the jemalloc build's memory footprint over time (issue #176).
           nohup bash scripts/rss-sample.sh rss-samples.csv 1 "${SERVER_PID}" >/dev/null 2>&1 &
           echo "RSS_SAMPLER_PID=$!" >> $GITHUB_ENV
 
