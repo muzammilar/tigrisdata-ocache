@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -173,6 +174,9 @@ type Storage struct {
 	accessUpdater    *accessUpdater        // Async access time updater for LRU tracking (nil in FIFO mode)
 	evictionPolicy   string                // "lru" or "fifo"; governs whether reads refresh access time
 	closed           atomic.Bool           // True when storage has been closed
+	lastVersion      atomic.Uint64         // Last issued version stamp (see nextVersion)
+	versionHi        atomic.Uint64         // Durably reserved stamp ceiling (see nextVersion)
+	versionMu        sync.Mutex            // Serializes reservation extension (rare)
 }
 
 // NewStorageWithConfig creates a new isolated Storage instance with the given config.
@@ -288,8 +292,6 @@ func NewStorageWithConfig(config *StorageConfig) (*Storage, error) {
 		PruneAge:        DeletePruneAge,
 		RetryDelay:      DeleteRetryDelay,
 	})
-	deletionQueue.Start()
-
 	// Configure compactor with recompaction if enabled
 	compactorConfig := &compaction.CompactorConfig{
 		MetaDB:            meta,
@@ -331,7 +333,6 @@ func NewStorageWithConfig(config *StorageConfig) (*Storage, error) {
 	}
 
 	compactor := compaction.NewCompactorWithConfig(compactorConfig)
-	compactor.Start()
 
 	s := &Storage{
 		meta:             meta,
@@ -353,6 +354,21 @@ func NewStorageWithConfig(config *StorageConfig) (*Storage, error) {
 		cleanupInterval = config.CleanupInterval
 	}
 	s.cleaner = NewCleaner(s, cleanupInterval, config.MaxDiskUsage)
+
+	// Restore the CAS stamp source's durable reservation so versions stay
+	// monotonic across restarts even under a backward clock step: every stamp
+	// ever issued is below the persisted high-water mark (see nextVersion).
+	// Done BEFORE any background goroutine starts, so a failed load returns a
+	// clean init error rather than leaking the compactor/deletion-queue threads
+	// against a Storage the caller believes never constructed.
+	if err := s.loadVersionReservation(); err != nil {
+		zlog.Error().Err(err).Msg("storage: failed to load version reservation")
+		return nil, storageErrors.NewInternalError("Init", err)
+	}
+
+	// All construction that can fail is done; now start the background workers.
+	deletionQueue.Start()
+	compactor.Start()
 
 	// The cleaner's initial pass recomputes size and, when a cap is set, backfills
 	// eviction-index coverage for keys written uncapped or under a prior policy so
